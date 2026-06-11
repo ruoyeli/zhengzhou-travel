@@ -1,0 +1,9 @@
+langgraph
+langchain
+langchain-openai
+langchain-community
+langgraph-checkpoint-postgres
+psycopg[binary]
+httpx
+python-dotenv
+sqlmodel
