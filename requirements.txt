@@ -9,3 +9,7 @@ python-dotenv
 fastapi
 uvicorn
 pytest
+chromadb
+langchain-community
+pypdf
+sentence-transformers

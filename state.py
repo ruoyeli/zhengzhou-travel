@@ -22,4 +22,4 @@ class AgentState(TypedDict):
     # 预订信息
     booking_info: BookingInfo
     # 意图分类结果
-    intent: str
+    intent: List[str]
