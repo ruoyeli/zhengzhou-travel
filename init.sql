@@ -1,0 +1,2 @@
+-- LangGraph PostgresSaver 会在 checkpointer.setup() 时自动建表。
+-- 酒店库存与订单使用项目内 SQLite：data/hotel.db
