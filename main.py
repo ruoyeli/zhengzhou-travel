@@ -1,15 +1,37 @@
 import os
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.postgres import PostgresSaver
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 from db import verify_postgres_connection
 from graph import build_graph
 
+load_dotenv()
+
+# ---------- API Key 鉴权 ----------
+
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
+
+
+def verify_api_key(x_api_key: Optional[str] = Header(None, alias="x-api-key")) -> Optional[str]:
+    """验证请求头中的 API Key。不通过直接返回 401。"""
+    if not API_SECRET_KEY:
+        # 未配置则不校验（本地开发）
+        return x_api_key
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="缺少 API Key")
+    if x_api_key != API_SECRET_KEY:
+        raise HTTPException(status_code=401, detail="无效的 API Key")
+    return x_api_key
+
+
+# ---------- 应用启动 ----------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,15 +63,17 @@ class ChatRequest(BaseModel):
 
 @app.get("/health")
 def health():
+    """健康检查，无需鉴权"""
     return {"status": "ok"}
 
 
 @app.post("/api/chat")
-def chat_with_agent(req: ChatRequest):
+def chat_with_agent(req: ChatRequest, api_key: Optional[str] = Depends(verify_api_key)):
+    """对话接口，需要 x-api-key 鉴权"""
     config = {"configurable": {"thread_id": req.session_id}}
     input_state = {
         "messages": [HumanMessage(content=req.message)],
-        "intent": "",
+        "intents": [],
     }
 
     try:

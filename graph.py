@@ -1,27 +1,44 @@
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 from langgraph.types import Send
-from state import AgentState
-from nodes import (
-    classifier_node, search_node,
-    book_node, weather_node, knowledge_node,
-    aggregator_node
-)
-def fan_out(state: dict):
-    """返回 Send 列表，LangGraph 并行执行每个意图对应的节点。"""
-    intents = state.get("intents", ["knowledge"])
-    sends = []
-    for intent in intents:
-        if intent == "query":
-            sends.append(Send("search", state))
-        elif intent == "book":
-            sends.append(Send("book", state))
-        elif intent == "weather":
-            sends.append(Send("weather", state))
-        else:
-            sends.append(Send("knowledge", state))
-    return sends
 
+from nodes import (
+    aggregator_node,
+    book_node,
+    classifier_node,
+    knowledge_node,
+    search_node,
+    weather_node,
+)
+from state import AgentState
+
+
+VALID_INTENTS = {"query", "book", "weather", "knowledge"}
+
+
+def route_intent(state: dict) -> str:
+    """Route a single intent to its graph node, keeping knowledge as fallback."""
+    intent = state.get("intent") or "knowledge"
+    routing = {
+        "query": "search",
+        "book": "book",
+        "weather": "weather",
+        "knowledge": "knowledge",
+    }
     return routing.get(intent, "knowledge")
+
+
+def fan_out(state: dict):
+    """Fan out to one or more intent-specific nodes."""
+    intents = state.get("intents") or ["knowledge"]
+    unique_intents = []
+    for intent in intents:
+        normalized = intent if intent in VALID_INTENTS else "knowledge"
+        if normalized not in unique_intents:
+            unique_intents.append(normalized)
+
+    return [Send(route_intent({"intent": intent}), state) for intent in unique_intents]
+
+
 def build_graph(checkpointer=None):
     graph = StateGraph(AgentState)
     # 注册节点

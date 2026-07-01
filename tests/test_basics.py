@@ -1,8 +1,8 @@
 """基础单元测试：路由、路径、API 降级、think 标签清理。"""
 
-from graph import route_intent
-from nodes import _fetch_amap_hotels, _strip_think_tags
-from paths import DATA_DIR, HOTEL_DB_PATH, PROJECT_ROOT
+from graph import fan_out, route_intent
+from nodes import _extract_json_object, _fetch_amap_hotels, _strip_think_tags
+from paths import CHROMA_DB_DIR, DATA_DIR, HOTEL_DB_PATH, PROJECT_ROOT
 
 
 def test_route_intent():
@@ -15,10 +15,17 @@ def test_route_intent():
     assert route_intent({}) == "knowledge"
 
 
+def test_fan_out_multiple_intents():
+    """多意图应分发到多个节点，并去重、兜底到 knowledge。"""
+    sends = fan_out({"intents": ["query", "weather", "query", "unknown"]})
+    assert [send.node for send in sends] == ["search", "weather", "knowledge"]
+
+
 def test_hotel_db_path():
-    """SQLite 数据库应位于项目 data/ 目录下，而非硬编码绝对路径。"""
+    """运行时数据路径应位于项目目录下，而非硬编码绝对路径。"""
     assert HOTEL_DB_PATH == PROJECT_ROOT / "data" / "hotel.db"
     assert DATA_DIR == PROJECT_ROOT / "data"
+    assert CHROMA_DB_DIR == PROJECT_ROOT / "chroma_db"
     assert HOTEL_DB_PATH.name == "hotel.db"
     assert "data" in HOTEL_DB_PATH.parts
 
@@ -46,3 +53,12 @@ def test_strip_think_tags_multiline():
         "<think>\n用户想要预订\n第二天入住\n</think>\nbook\n"
     )
     assert result == "book"
+
+
+def test_extract_json_object():
+    """LLM 输出中夹杂文本或 think 标签时，也应提取第一个 JSON 对象。"""
+    assert _extract_json_object('说明 <think>x</think> {"city": "郑州", "max_price": 300}') == {
+        "city": "郑州",
+        "max_price": 300,
+    }
+    assert _extract_json_object("不是 JSON") == {}

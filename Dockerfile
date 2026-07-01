@@ -6,8 +6,8 @@ WORKDIR /app
 
 # 3. 把本地的 requirements.txt 复制到容器里并安装依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
+# 清空代理变量，避免构建环境里的代理影响 pip 安装。
+RUN HTTP_PROXY="" HTTPS_PROXY="" http_proxy="" https_proxy="" pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 # 4. 把当前目录下的所有代码复制到容器的 /app 目录下
 COPY . .
 

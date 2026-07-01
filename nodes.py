@@ -1,22 +1,25 @@
 import json
+import logging
 import os
 import random
 import re
 import sqlite3
-import time
 import uuid
 from datetime import date, datetime
-from langchain_core.tools import tool
 from typing import Optional
-from rag import search_docs 
+
 import httpx
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
-from paths import get_sqlite_connection
+from paths import CHROMA_DB_DIR, get_sqlite_connection
+from rag import search_docs
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 llm = ChatOpenAI(
     model="deepseek-chat",
@@ -28,25 +31,9 @@ llm = ChatOpenAI(
 AMAP_KEY = os.getenv("AMAP_API_KEY")
 
 
-def stream_llm(messages: list) -> str:
-    """流式调用 LLM，逐字打印，返回完整内容。"""
-    print("\n助手：", end="", flush=True)
-    full_content = ""
-    for chunk in llm.stream(messages):
-        piece = chunk.content
-        print(piece, end="", flush=True)
-        full_content += piece
-    print()
-    return full_content
-
-
-def print_streaming(text: str) -> None:
-    """终端模式下模拟流式打印。"""
-    print("\n助手：", end="", flush=True)
-    for char in text:
-        print(char, end="", flush=True)
-        time.sleep(0.02)
-    print()
+def generate_text(messages: list) -> str:
+    """Call the chat model and return text without writing to stdout."""
+    return _llm_text(llm.invoke(messages))
 
 
 def _llm_text(response) -> str:
@@ -59,11 +46,24 @@ def _strip_think_tags(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
+def _extract_json_object(text: str) -> dict:
+    """Extract the first JSON object from an LLM response."""
+    clean_text = _strip_think_tags(text)
+    match = re.search(r"\{.*\}", clean_text, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        data = json.loads(match.group())
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _init_hotel_table(cursor: sqlite3.Cursor) -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS hotel (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
+            name TEXT UNIQUE,
             price INTEGER,
             rating REAL,
             address TEXT,
@@ -76,7 +76,7 @@ def _init_order_table(cursor: sqlite3.Cursor) -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS "order" (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id TEXT,
+            order_id TEXT UNIQUE,
             hotel_name TEXT,
             guest_name TEXT,
             check_in TEXT,
@@ -90,7 +90,7 @@ def _init_order_table(cursor: sqlite3.Cursor) -> None:
 def _fetch_amap_hotels(location: str, city: str) -> list:
     """调用高德 POI 接口，失败时返回空列表。"""
     if not AMAP_KEY:
-        print("[WARN] 未配置 AMAP_API_KEY，跳过高德查询")
+        logger.warning("未配置 AMAP_API_KEY，跳过高德查询")
         return []
 
     try:
@@ -112,9 +112,9 @@ def _fetch_amap_hotels(location: str, city: str) -> list:
             raise ValueError(data.get("info", "高德 API 返回错误"))
         return data.get("pois") or []
     except httpx.HTTPError as e:
-        print(f"[WARN] 高德 API 请求失败: {e}")
+        logger.warning("高德 API 请求失败: %s", e)
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
-        print(f"[WARN] 高德 API 响应异常: {e}")
+        logger.warning("高德 API 响应异常: %s", e)
     return []
 
 
@@ -132,9 +132,9 @@ def _fetch_open_meteo_coords(city: str) -> tuple[float, float]:
         result = geo["results"][0]
         return result["latitude"], result["longitude"]
     except httpx.HTTPError as e:
-        print(f"[WARN] Open-Meteo 地理编码请求失败: {e}")
+        logger.warning("Open-Meteo 地理编码请求失败: %s", e)
     except (KeyError, IndexError, TypeError, ValueError) as e:
-        print(f"[WARN] Open-Meteo 地理编码响应异常: {e}")
+        logger.warning("Open-Meteo 地理编码响应异常: %s", e)
     return default
 
 
@@ -156,9 +156,9 @@ def _fetch_open_meteo_forecast(lat: float, lon: float) -> Optional[dict]:
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPError as e:
-        print(f"[WARN] Open-Meteo 预报请求失败: {e}")
+        logger.warning("Open-Meteo 预报请求失败: %s", e)
     except (ValueError, json.JSONDecodeError) as e:
-        print(f"[WARN] Open-Meteo 预报响应异常: {e}")
+        logger.warning("Open-Meteo 预报响应异常: %s", e)
     return None
 
 @tool
@@ -176,7 +176,6 @@ def classifier_node(state: dict) -> dict:
         HumanMessage(content=user_msg),
     ])
 
-    # 从 tool_calls 提取结构化数据（不会格式错误，不需要 try/except）
     intents = ["knowledge"]  # 默认兜底
     if response.tool_calls:
         args = response.tool_calls[0].get("args", {})
@@ -198,16 +197,13 @@ def search_node(state: dict) -> dict:
         HumanMessage(content=user_msg),
     ])
 
-    extract_text = _strip_think_tags(_llm_text(extract))
-
+    params = _extract_json_object(_llm_text(extract))
+    city = params.get("city") or "郑州"
+    location = params.get("location") or "郑州"
     try:
-        match = re.search(r"\{.*\}", extract_text, re.DOTALL)
-        params = json.loads(match.group()) if match else {}
-        city = params.get("city", "郑州")
-        location = params.get("location", "郑州")
-        max_price = params.get("max_price", 5000)
-    except (json.JSONDecodeError, AttributeError):
-        city, location, max_price = "郑州", "郑州", 5000
+        max_price = int(params.get("max_price") or 5000)
+    except (TypeError, ValueError):
+        max_price = 5000
 
     pois = _fetch_amap_hotels(location, city)
     hotels = []
@@ -241,13 +237,13 @@ def search_node(state: dict) -> dict:
                 continue
 
             fake_rating = round(random.uniform(3.8, 4.9), 1)
-            try:
-                cursor.execute(
-                    "INSERT INTO hotel (name, price, rating, address, stock) VALUES (?, ?, ?, ?, ?)",
-                    (name, fake_price, fake_rating, address, 10),
-                )
-            except sqlite3.IntegrityError:
-                pass
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO hotel (name, price, rating, address, stock)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (name, fake_price, fake_rating, address, 10),
+            )
 
             cursor.execute(
                 "SELECT name, price, rating, address, stock FROM hotel WHERE name=? AND price<=? AND stock>0",
@@ -264,7 +260,6 @@ def search_node(state: dict) -> dict:
         conn.close()
     except sqlite3.Error as e:
         reply = f"本地数据库错误，暂时无法查询酒店：{e}"
-        print_streaming(reply)
         return {"hotels_list": [], "messages": [AIMessage(content=reply)]}
 
     if hotels:
@@ -278,8 +273,6 @@ def search_node(state: dict) -> dict:
         reply = f"为您找到{location}附近{max_price}元以内的酒店：\n{hotel_text}"
     else:
         reply = f"抱歉，未找到{location}附近{max_price}元以内有库存的酒店。"
-
-    print_streaming(reply)
     return {"hotels_list": hotels, "messages": [AIMessage(content=reply)]}
 
 
@@ -310,32 +303,31 @@ def book_node(state: dict) -> dict:
         HumanMessage(content=user_msg),
     ])
 
-    extract_text = _strip_think_tags(_llm_text(extract))
-
-    try:
-        match = re.search(r"\{.*\}", extract_text, re.DOTALL)
-        if not match:
-            raise ValueError("no json")
-        params = json.loads(match.group())
-    except (json.JSONDecodeError, ValueError):
+    params = _extract_json_object(_llm_text(extract))
+    if not params:
         reply = "参数解析失败，请重新描述预订信息。"
-        print_streaming(reply)
         return {"messages": [AIMessage(content=reply)]}
 
     missing = [f for f in ["hotel_name", "check_in", "check_out", "guest_name"] if not params.get(f)]
     if missing:
         reply = "还缺少以下信息：{}，请补充后再试。".format("、".join(missing))
-        print_streaming(reply)
         return {"messages": [AIMessage(content=reply)]}
 
     try:
+        check_in = datetime.strptime(params["check_in"], "%Y-%m-%d").date()
+        check_out = datetime.strptime(params["check_out"], "%Y-%m-%d").date()
+        nights = (check_out - check_in).days
+        if nights <= 0:
+            reply = "退房日期必须晚于入住日期，请重新确认入住和退房时间。"
+            return {"messages": [AIMessage(content=reply)]}
+
         conn = get_sqlite_connection()
         conn.isolation_level = None
         cursor = conn.cursor()
         _init_hotel_table(cursor)
         _init_order_table(cursor)
 
-        cursor.execute("BEGIN")
+        cursor.execute("BEGIN IMMEDIATE")
         cursor.execute("SELECT stock FROM hotel WHERE name=?", (params["hotel_name"],))
         row = cursor.fetchone()
 
@@ -343,22 +335,25 @@ def book_node(state: dict) -> dict:
             conn.rollback()
             conn.close()
             reply = "系统中没有\"{}\"的记录，请先查询该地区酒店。".format(params["hotel_name"])
-            print_streaming(reply)
             return {"messages": [AIMessage(content=reply)]}
 
         if row[0] <= 0:
             conn.rollback()
             conn.close()
             reply = "{}已满房，请选择其他酒店。".format(params["hotel_name"])
-            print_streaming(reply)
             return {"messages": [AIMessage(content=reply)]}
 
-        cursor.execute("UPDATE hotel SET stock = stock - 1 WHERE name=?", (params["hotel_name"],))
+        cursor.execute(
+            "UPDATE hotel SET stock = stock - 1 WHERE name=? AND stock>0",
+            (params["hotel_name"],),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            conn.close()
+            reply = "{}已满房，请选择其他酒店。".format(params["hotel_name"])
+            return {"messages": [AIMessage(content=reply)]}
 
         order_id = "ORD-" + str(uuid.uuid4())[:8].upper()
-        check_in = datetime.strptime(params["check_in"], "%Y-%m-%d").date()
-        check_out = datetime.strptime(params["check_out"], "%Y-%m-%d").date()
-        nights = (check_out - check_in).days
 
         cursor.execute(
             """INSERT INTO "order" (order_id, hotel_name, guest_name, check_in, check_out, total_nights, status)
@@ -380,7 +375,6 @@ def book_node(state: dict) -> dict:
             nights=nights,
             guest_name=params["guest_name"],
         )
-        print_streaming(reply)
         return {
             "booking_info": {
                 "hotel_name": params["hotel_name"],
@@ -393,11 +387,9 @@ def book_node(state: dict) -> dict:
 
     except sqlite3.Error as e:
         reply = f"预订失败（数据库错误）：{e}"
-        print_streaming(reply)
         return {"messages": [AIMessage(content=reply)]}
     except ValueError as e:
         reply = f"预订失败（日期格式错误）：{e}"
-        print_streaming(reply)
         return {"messages": [AIMessage(content=reply)]}
 
 
@@ -416,7 +408,7 @@ def weather_node(state: dict) -> dict:
         return {"messages": [AIMessage(content="天气服务暂时不可用，请稍后再试。")]}
 
     today = date.today().isoformat()
-    content = stream_llm([
+    content = generate_text([
         SystemMessage(content=f"""根据天气JSON数据回答用户问题。
 今天日期：{today}
 daily数组索引规则：index 0=今天，index 1=明天，index 2=后天，以此类推。
@@ -432,7 +424,7 @@ def knowledge_node(state: dict) -> dict:
     user_msg = state["messages"][-1].content
 
     # 从文档库检索相关内容
-    context = search_docs(user_msg, "chroma_db")
+    context = search_docs(user_msg, str(CHROMA_DB_DIR))
 
     if context:
         system_prompt = (
@@ -447,11 +439,11 @@ def knowledge_node(state: dict) -> dict:
     else:
         system_prompt = "你是郑州本地旅行助手，熟悉郑州的景点、历史、交通和美食。友好地回答用户问题。"
 
-    content = stream_llm([
+    content = generate_text([
         SystemMessage(content=system_prompt),
     ] + state["messages"])
     return {"messages": [AIMessage(content=content)]}
-1
+
 
 def aggregator_node(state: dict) -> dict:
     """将多个节点的输出融合为一段自然回复。"""
@@ -459,11 +451,12 @@ def aggregator_node(state: dict) -> dict:
     if not messages:
         return {"messages": [AIMessage(content="抱歉，我暂时无法处理您的请求。")]}
 
-    content = stream_llm([
+    content = generate_text([
         SystemMessage(content=(
             "你是郑州旅行助手。请把以下多条查询结果融合成一段自然、连贯的回复。"
-            "不要简单拼接，要用自己的话自然过渡。如果某项结果为空或失败，简单带过即可。"
+            "不要简单拼接，要用自己的话自然过渡。如果某项结果为空或失败，需要明确告知用户此项信息未找到。并且有礼貌地回复用户。"
         )),
     ] + messages)
 
     return {"messages": [AIMessage(content=content)]}
+

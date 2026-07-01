@@ -1,62 +1,96 @@
-# 郑州旅行助手
+# 郑州旅行助手 Agent
 
-基于 **FastAPI + LangGraph + DeepSeek** 的多轮对话旅行助手，支持酒店查询、预订、天气查询和郑州本地知识问答。
+一个面向本地旅行场景的多轮 AI 助手 Demo，基于 **FastAPI + LangGraph + DeepSeek + RAG** 实现酒店查询、模拟预订、天气查询和郑州本地知识问答。项目重点展示 AI 应用开发中的意图路由、工具调用、状态记忆、RAG 检索、外部 API 集成和容器化部署能力。
 
-## 项目结构
+> 说明：酒店价格、评分、库存和订单是用于演示 Agent 工作流的模拟业务数据，不对接真实交易系统。
 
-```
-zhengzhou-travel/
-├── main.py           # FastAPI 入口（/api/chat、/health）
-├── run_terminal.py   # 本地终端交互调试
-├── view_memory.py    # 查看指定 session 的对话记忆
-├── graph.py          # LangGraph 状态图与意图路由
-├── nodes.py          # 各业务节点（分类、查询、预订、天气、闲聊）
-├── state.py          # AgentState 类型定义
-├── paths.py          # 项目路径与 SQLite 数据库位置
-├── db.py             # PostgreSQL 连接校验（会话记忆）
-├── data/             # SQLite 数据目录（运行时生成 hotel.db）
-├── init.sql          # Docker 首次启动 Postgres 时的说明脚本
-├── requirements.txt
-├── tests/            # 基础单元测试
-├── Dockerfile
-└── docker-compose.yml
-```
+## 项目亮点
+
+- 使用 `LangGraph StateGraph` 编排多轮 Agent 流程：先识别用户意图，再分发到酒店查询、预订、天气或知识问答节点，最后统一聚合回复。
+- 支持多意图输入，例如用户可以在一轮对话中同时询问酒店和天气，系统会 fan-out 到多个业务节点处理。
+- 使用 `PostgreSQL + PostgresSaver` 持久化 LangGraph checkpoint，实现 session 级会话记忆；用户说“订第一家”时可以引用上一轮查询结果。
+- 接入高德地图 POI 查询酒店，接入 Open-Meteo 获取天气数据，并通过 LLM 将结构化结果转成自然语言回复。
+- 基于 `PyPDFLoader + RecursiveCharacterTextSplitter + HuggingFace Embeddings + Chroma` 构建本地 RAG 知识问答。
+- 使用 `SQLite` 管理模拟酒店库存和订单，预订时通过事务和条件更新避免库存不足仍生成订单。
+- 提供 FastAPI HTTP 接口、终端调试脚本、会话记忆查看脚本、Docker Compose 部署和 pytest 基础测试。
+
+## 技术栈
+
+| 分类 | 技术 |
+|------|------|
+| Web API | FastAPI, Uvicorn, Pydantic |
+| Agent 编排 | LangGraph, LangChain |
+| LLM | DeepSeek Chat, OpenAI-compatible API |
+| RAG | Chroma, HuggingFace Embeddings, PyPDFLoader |
+| 数据存储 | PostgreSQL checkpoint, SQLite business data |
+| 外部 API | 高德地图 Web 服务, Open-Meteo |
+| 工程化 | Docker, Docker Compose, pytest, python-dotenv |
 
 ## 架构概览
 
-```
+```text
 用户输入
-   ↓
-classifier（意图分类）
-   ↓
-┌──────────┬──────────┬──────────┬────────────┐
-│  search  │   book   │  weather │ knowledge  │
-│ 酒店查询  │ 酒店预订  │ 天气查询  │ 本地问答    │
-└──────────┴──────────┴──────────┴────────────┘
+  |
+  v
+FastAPI / Terminal
+  |
+  v
+LangGraph classifier
+  |
+  +--> search     高德 POI + SQLite 酒店库存
+  +--> book       LLM 参数抽取 + SQLite 事务扣库存
+  +--> weather    Open-Meteo + LLM 解读
+  +--> knowledge  Chroma 向量检索 + RAG 回答
+  |
+  v
+aggregator 聚合自然语言回复
+  |
+  v
+PostgreSQL checkpoint 保存多轮会话状态
 ```
 
-## 数据存储
+## 核心能力
 
-业务数据与会话记忆分开存储：
+| 能力 | 示例 | 实现方式 |
+|------|------|----------|
+| 酒店查询 | “郑州东站附近 500 元以内的酒店” | LLM 抽取地点/预算，高德 POI 查询，SQLite 写入模拟库存 |
+| 酒店预订 | “订第一家，明天住两晚，我叫张三” | 读取 checkpoint 中的 `hotels_list`，LLM 抽取入住信息，SQLite 事务扣库存并生成订单 |
+| 天气查询 | “郑州明天天气怎么样” | Open-Meteo 获取 7 天天气，LLM 生成出行建议 |
+| 本地问答 | “少林寺怎么去” | Chroma 检索本地 PDF 知识库，结合 LLM 输出回答 |
+| 多轮记忆 | “就订第一家” | PostgreSQL checkpoint 保存上一轮状态 |
 
-| 用途 | 存储 | 位置 / 机制 |
-|------|------|-------------|
-| 多轮对话记忆 | PostgreSQL | LangGraph `PostgresSaver` checkpoint |
-| 酒店库存 | SQLite | `data/hotel.db` → `hotel` 表 |
-| 订单 | SQLite | `data/hotel.db` → `order` 表 |
+## 项目结构
 
-- **SQLite** 路径由 `paths.py` 管理，使用相对路径 `data/hotel.db`，无需硬编码绝对路径。
-- **PostgreSQL** 仅用于 LangGraph 会话持久化；`checkpointer.setup()` 会自动创建 checkpoint 表。
+```text
+zhengzhou-travel/
+├── main.py              # FastAPI 入口，提供 /api/chat 和 /health
+├── graph.py             # LangGraph 状态图、意图路由和 fan-out
+├── nodes.py             # 分类、查询、预订、天气、知识问答、聚合节点
+├── state.py             # AgentState 类型定义
+├── rag.py               # PDF 加载、文本切分、Chroma 向量库检索
+├── db.py                # PostgreSQL 连接校验
+├── paths.py             # 项目路径、SQLite 和 Chroma 路径
+├── run_terminal.py      # 本地终端调试入口
+├── view_memory.py       # 查看指定 session 的 checkpoint 记忆
+├── docs/                # 可公开的 RAG 示例资料
+├── tests/               # 基础单元测试
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
+```
 
-## 环境要求
+## 数据设计
 
-- Python 3.10+
-- PostgreSQL 15（可用 Docker 提供）
-- API Key：DeepSeek、高德地图 Web 服务
+| 数据 | 存储 | 说明 |
+|------|------|------|
+| 会话状态 | PostgreSQL | LangGraph `PostgresSaver` checkpoint，保存 messages、intents、hotels_list、booking_info |
+| 酒店库存 | SQLite | `data/hotel.db` 的 `hotel` 表，运行时自动创建 |
+| 订单信息 | SQLite | `data/hotel.db` 的 `order` 表，运行时自动创建 |
+| 知识库向量 | Chroma | `chroma_db/`，由 RAG 构建流程生成，默认不提交运行产物 |
 
 ## 快速开始
 
-### 1. 配置环境变量
+### 1. 准备环境变量
 
 ```bash
 cp .env.example .env
@@ -66,9 +100,11 @@ cp .env.example .env
 
 | 变量 | 说明 |
 |------|------|
-| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 |
-| `AMAP_API_KEY` | 高德地图 Web 服务密钥 |
-| `DB_URI` | PostgreSQL 连接串（密码需与 `docker-compose.yml` 一致） |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key |
+| `AMAP_API_KEY` | 高德地图 Web 服务 Key |
+| `DB_URI` | PostgreSQL 连接串 |
+| `API_SECRET_KEY` | 可选；配置后 `/api/chat` 需要 `x-api-key` |
+| `LANGCHAIN_*` | 可选；用于 LangSmith tracing |
 
 ### 2. 启动 PostgreSQL
 
@@ -82,9 +118,7 @@ docker compose up db -d
 pip install -r requirements.txt
 ```
 
-### 4. 运行
-
-**终端调试（推荐本地开发）：**
+### 4. 运行终端调试
 
 ```bash
 python run_terminal.py
@@ -92,7 +126,7 @@ python run_terminal.py
 
 默认 `thread_id` 为 `local_debug_user`，输入 `quit` / `exit` / `退出` 结束。
 
-**HTTP API：**
+### 5. 运行 HTTP API
 
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -103,18 +137,13 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```bash
 curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
+  -H "x-api-key: 123456" \
   -d "{\"session_id\": \"user-001\", \"message\": \"郑州东站附近有什么酒店？\"}"
 ```
 
-**查看会话记忆：**
+如果没有配置 `API_SECRET_KEY`，本地开发时可以省略 `x-api-key`。
 
-```bash
-python view_memory.py local_debug_user
-# 或指定其他 session_id
-python view_memory.py user-001
-```
-
-### 5. Docker 一键部署
+### 6. Docker Compose 一键启动
 
 ```bash
 docker compose up -d --build
@@ -122,53 +151,43 @@ docker compose up -d --build
 
 | 地址 | 说明 |
 |------|------|
-| http://localhost:8000 | API |
 | http://localhost:8000/health | 健康检查 |
 | http://localhost:8000/docs | Swagger 文档 |
-
-## 对话能力
-
-| 意图 | 触发示例 | 实现 |
-|------|----------|------|
-| `query` | 「洛阳龙门附近 500 元以内的酒店」 | 高德 POI + SQLite 动态补库存 |
-| `book` | 「订第一家，明天住两晚，我叫张三」 | 解析参数 + SQLite 扣库存写订单 |
-| `weather` | 「郑州明天天气怎么样」 | Open-Meteo 7 天预报 + LLM 解读 |
-| `knowledge` | 「少林寺怎么去」 | 郑州本地旅行问答 |
-
-多轮预订依赖上一轮 `hotels_list`（保存在 PostgreSQL checkpoint 中）。
-
-## 异常处理
-
-外部依赖均带有 `try/except`，失败时返回友好提示而非直接崩溃：
-
-- 高德 API → 返回空列表，提示未找到酒店
-- Open-Meteo → 回退默认坐标或提示服务不可用
-- SQLite → 捕获 `sqlite3.Error`，返回数据库错误信息
-- PostgreSQL → 捕获 `psycopg.Error`，启动或调用时报错
+| http://localhost:8000/api/chat | 对话接口 |
 
 ## 测试
 
 ```bash
-pip install pytest
 pytest tests/ -v
 ```
 
-当前包含 3 个基础测试：
+当前测试覆盖：
 
-1. `test_route_intent` — 意图路由是否正确
-2. `test_hotel_db_path` — SQLite 路径是否为项目相对路径
-3. `test_fetch_amap_hotels_without_key` — 未配置 API Key 时是否安全降级
+- 单意图路由兜底
+- 多意图 fan-out、去重和 fallback
+- 项目相对路径管理
+- 高德 API Key 缺失时的安全降级
+- `<think>` 标签清理
+- LLM 输出中的 JSON 对象提取
 
-## 常见问题
+## 工程细节
 
-**Q: 终端连不上数据库？**
+- API Key 鉴权：`API_SECRET_KEY` 为空时便于本地调试；配置后 `/api/chat` 会校验 `x-api-key`。
+- 运行产物忽略：`.env`、SQLite 数据库、Chroma 向量库、缓存目录均不会提交到 Git。
+- Docker 配置：`docker-compose.yml` 中的 `your_password` 是示例占位值，实际部署时应通过 `.env` 或 secret 管理。
+- RAG 性能：embedding 和 vectorstore 做了进程内缓存，避免每次查询重复初始化。
+- 预订一致性：扣库存使用 SQLite 事务和条件更新，库存不足时不会继续创建订单。
 
-本地运行时 `run_terminal.py` 会把 `DB_URI` 中的 `@db:` 自动替换为 `@localhost:`。确保已执行 `docker compose up db -d`。
+## 简历描述参考
 
-**Q: 查询到的酒店在哪里？**
+可以在简历中写作：
 
-高德返回的 POI 会写入 `data/hotel.db`；首次查询后该文件自动创建。
+> 基于 FastAPI、LangGraph 和 DeepSeek 构建郑州旅行多轮 Agent，支持酒店查询、模拟预订、天气查询和本地 RAG 问答；使用 PostgreSQL checkpoint 持久化会话状态，结合 Chroma 向量库和 PDF 知识库实现本地知识检索，并通过 Docker Compose 提供可复现部署环境。
 
-**Q: `data/hotel.db` 要提交到 Git 吗？**
+## 后续可优化方向
 
-不需要，`.gitignore` 已忽略 `*.db` 文件。
+- 将模拟酒店库存替换为真实业务数据源或独立订单服务。
+- 增加 RAG 检索评估集，统计召回率、命中率和回答准确率。
+- 增加 FastAPI 集成测试和外部 API mock。
+- 将 Docker Compose 中的数据库密码改成环境变量注入。
+- 增加结构化日志、请求 ID、限流和更完整的异常监控。

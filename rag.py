@@ -1,10 +1,16 @@
+import logging
+import os
+from functools import lru_cache
+from typing import List
+
 from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
-from pathlib import Path
-import os
-from typing import List
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+
+logger = logging.getLogger(__name__)
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
 
 def load_and_split_pdfs(docs_dir: str) -> List[str]:
@@ -34,10 +40,23 @@ def load_and_split_pdfs(docs_dir: str) -> List[str]:
             chunks = splitter.split_documents(docs)
             all_chunks.extend([chunk.page_content for chunk in chunks])
         except Exception as e:
-            print(f"加载 PDF 文件 {pdf_file} 时出错: {e}")
+            logger.warning("加载 PDF 文件 %s 时出错: %s", pdf_file, e)
             continue
 
     return all_chunks
+
+
+@lru_cache(maxsize=1)
+def get_embeddings():
+    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+
+
+@lru_cache(maxsize=4)
+def get_vectorstore(persist_dir: str):
+    return Chroma(
+        persist_directory=persist_dir,
+        embedding_function=get_embeddings(),
+    )
 
 
 def build_vectorstore(chunks: List[str], persist_dir: str):
@@ -47,13 +66,12 @@ def build_vectorstore(chunks: List[str], persist_dir: str):
     if not chunks:
         raise ValueError("文本块列表为空，无法构建向量库")
 
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    # 创建 Chroma 向量库并持久化
     vectorstore = Chroma.from_texts(
         texts=chunks,
-        embedding=embeddings,
+        embedding=get_embeddings(),
         persist_directory=persist_dir,
     )
+    get_vectorstore.cache_clear()
     return vectorstore
 
 
@@ -61,15 +79,7 @@ def search_docs(query: str, persist_dir: str, k: int = 3) -> str:
     if not os.path.isdir(persist_dir):
         return ""
 
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    
-    # 从持久化目录加载已有的向量库
-    vectorstore = Chroma(
-        persist_directory=persist_dir,
-        embedding_function=embeddings,
-    )
-
-    docs = vectorstore.similarity_search(query, k=k)
+    docs = get_vectorstore(persist_dir).similarity_search(query, k=k)
     if not docs:
         return ""
 

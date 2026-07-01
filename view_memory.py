@@ -45,7 +45,7 @@ def view_history(thread_id: str):
 
     print("\n=== 存储的变量状态 ===")
     print(f"酒店列表数量: {len(state.values.get('hotels_list', []))}")
-    print(f"当前意图: {state.values.get('intent')}")
+    print(f"当前意图: {state.values.get('intents')}")
     print(f"预订信息: {state.values.get('booking_info')}")
 
 

@@ -24,6 +24,7 @@ def main():
         sys.exit(1)
 
     db_uri = normalize_db_uri(db_uri)
+    os.environ["DB_URI"] = db_uri
 
     try:
         verify_postgres_connection()
@@ -47,7 +48,7 @@ def main():
                 if not user_input:
                     continue
 
-                input_state = {"messages": [HumanMessage(content=user_input)], "intent": ""}
+                input_state = {"messages": [HumanMessage(content=user_input)], "intents": []}
                 try:
                     result = graph.invoke(input_state, config=config)
                     print(f"助手：{result['messages'][-1].content}")
