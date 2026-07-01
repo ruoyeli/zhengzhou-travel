@@ -160,34 +160,3 @@ docker compose up -d --build
 ```bash
 pytest tests/ -v
 ```
-
-当前测试覆盖：
-
-- 单意图路由兜底
-- 多意图 fan-out、去重和 fallback
-- 项目相对路径管理
-- 高德 API Key 缺失时的安全降级
-- `<think>` 标签清理
-- LLM 输出中的 JSON 对象提取
-
-## 工程细节
-
-- API Key 鉴权：`API_SECRET_KEY` 为空时便于本地调试；配置后 `/api/chat` 会校验 `x-api-key`。
-- 运行产物忽略：`.env`、SQLite 数据库、Chroma 向量库、缓存目录均不会提交到 Git。
-- Docker 配置：`docker-compose.yml` 中的 `your_password` 是示例占位值，实际部署时应通过 `.env` 或 secret 管理。
-- RAG 性能：embedding 和 vectorstore 做了进程内缓存，避免每次查询重复初始化。
-- 预订一致性：扣库存使用 SQLite 事务和条件更新，库存不足时不会继续创建订单。
-
-## 简历描述参考
-
-可以在简历中写作：
-
-> 基于 FastAPI、LangGraph 和 DeepSeek 构建郑州旅行多轮 Agent，支持酒店查询、模拟预订、天气查询和本地 RAG 问答；使用 PostgreSQL checkpoint 持久化会话状态，结合 Chroma 向量库和 PDF 知识库实现本地知识检索，并通过 Docker Compose 提供可复现部署环境。
-
-## 后续可优化方向
-
-- 将模拟酒店库存替换为真实业务数据源或独立订单服务。
-- 增加 RAG 检索评估集，统计召回率、命中率和回答准确率。
-- 增加 FastAPI 集成测试和外部 API mock。
-- 将 Docker Compose 中的数据库密码改成环境变量注入。
-- 增加结构化日志、请求 ID、限流和更完整的异常监控。
